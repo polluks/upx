@@ -57,14 +57,14 @@ endif()
 
 # test config options (see below)
 # IMPORTANT NOTE: self-pack test can only work if the host executable format is supported by UPX!
-option(UPX_CONFIG_DISABLE_SELF_PACK_TEST   "Do not test packing UPX with itself" OFF)
-option(UPX_CONFIG_DISABLE_EXHAUSTIVE_TESTS "Do not run exhaustive tests"         OFF)
+option(UPX_CONFIG_DISABLE_SELF_PACK_TEST   "Do not test packing UPX with itself." OFF)
+option(UPX_CONFIG_DISABLE_EXHAUSTIVE_TESTS "Do not run exhaustive tests."         OFF)
 
 #***********************************************************************
 # init
 #***********************************************************************
 
-set(UPX_VERSION_STRING "5.0.3") # this should match src/version.h
+set(UPX_VERSION_STRING "5.1.0") # this should match src/version.h
 
 upx_cmake_include_hook(2_init)
 
@@ -289,7 +289,7 @@ if(Threads_FOUND)
         if(NOT result)
             # failed; under MinGW be sure to use the posix-threads and NOT the win32-threads version
             if(UPX_CONFIG_REQUIRE_THREADS OR (UPX_CONFIG_EXPECT_THREADS AND NOT UPX_CONFIG_DISABLE_THREADS))
-                message(WARNING "Threads FAILED ${f}: ${output}") # output from try_compile
+                message(WARNING "Threads FAILED ${f}: ${output}") # output from try_compile()
             endif()
             set(Threads_FOUND OFF)
             break()

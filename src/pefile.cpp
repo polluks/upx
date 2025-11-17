@@ -96,6 +96,7 @@ PeFile::PeFile(InputFile *f) : super(f) {
     use_tls_callbacks = false;
     oloadconf = nullptr;
     soloadconf = 0;
+    dbgCET = nullptr;
 
     isdll = false;
     isrtm = false;
@@ -1486,23 +1487,33 @@ void PeFile::processTls2(Reloc *const rel, const Interval *const iv, unsigned ne
 
     unsigned ic;
     // NEW: if TLS callbacks are used, relocate the VA of the callback chain, too - Stefan Widmann
-    for (ic = 0; ic < (use_tls_callbacks ? sizeof(LE32) * cb_size : (sizeof(LE32) - 1) * cb_size);
-         ic += cb_size)
-        rel->add_reloc(newaddr + ic, reloc_type);
+    for (ic = 0; ic < (unsigned) (use_tls_callbacks ? 4 : 3); ic++)
+        rel->add_reloc(newaddr + ic * cb_size, reloc_type);
 
     SPAN_S_VAR(tls, const tlsp, mb_otls);
     // now the relocation entries in the tls data area
-    for (ic = 0; ic < iv->ivnum; ic += sizeof(LE32)) {
+    for (ic = 0; ic < iv->ivnum; ic++) {
         SPAN_S_VAR(byte, const pp,
                    otls + (iv->ivarr[ic].start - (tlsp->datastart - imagebase) + sizeof(tls)));
         LEXX *const p = (LEXX *) raw_bytes(pp, sizeof(LEXX));
         cb_value_t kc = *p;
-        if (kc < tlsp->dataend && kc >= tlsp->datastart) {
+        if (kc >= tlsp->datastart && kc < tlsp->dataend) {
+            // add a relocation entry referring to an address inside of the original tls data area
+            // - as the new tls area is moved, the referred address have to be also adjusted
             kc += newaddr + sizeof(tls) - tlsp->datastart;
             *p = kc + imagebase;
             rel->add_reloc(kc, iv->ivarr[ic].len);
-        } else
-            rel->add_reloc(kc - imagebase, iv->ivarr[ic].len);
+        } else {
+            // add a relocation entry referring to an address outside of the original tls data area
+            // by adding the difference of the new tlsdatastart and the old tlsdatastart to
+            // the address of the original relocation record
+            const unsigned a =
+                iv->ivarr[ic].start + (newaddr + sizeof(tls)) - (tlsp->datastart - imagebase);
+            // Must not overwrite compressed data
+            if (a < newaddr && !opt->win32_pe.strip_relocs)
+                throwCantPack("relocation too low (%#x < %#x); try --strip-relocs", a, newaddr);
+            rel->add_reloc(a, iv->ivarr[ic].len);
+        }
     }
 
     const unsigned tls_data_size = tlsp->dataend - tlsp->datastart;
@@ -2083,25 +2094,32 @@ unsigned PeFile::stripDebug(unsigned overlaystart) {
     if (IDADDR(PEDIR_DEBUG) == 0)
         return overlaystart;
 
-    struct alignas(1) DebugDir final {
-        byte _[16]; // flags, time/date, version, type
-        LE32 size;
-        byte __[4]; // rva
-        LE32 fpos;
-    };
-
     COMPILE_TIME_ASSERT(sizeof(DebugDir) == 28)
     COMPILE_TIME_ASSERT_ALIGNED1(DebugDir)
-    COMPILE_TIME_ASSERT(sizeof(((DebugDir *) nullptr)->_) == 16)
-    COMPILE_TIME_ASSERT(sizeof(((DebugDir *) nullptr)->__) == 4)
 
     const unsigned skip = IDADDR(PEDIR_DEBUG);
     const unsigned take = IDSIZE(PEDIR_DEBUG);
-    const DebugDir *dd = (const DebugDir *) ibuf.subref("bad debug %#x", skip, take);
-    for (unsigned ic = 0; ic < IDSIZE(PEDIR_DEBUG) / sizeof(DebugDir); ic++, dd++)
+    DebugDir *const dd0 = (DebugDir *) ibuf.subref("bad debug %#x", skip, take);
+    DebugDir *dd = dd0;
+    for (unsigned ic = 0; ic < IDSIZE(PEDIR_DEBUG) / sizeof(DebugDir); ic++, dd++) {
+        if (IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS == dd->type && dd->size == sizeof(LE32) &&
+            dd->fpos <= (file_size_u - sizeof(LE32))) {
+            // fpos need not belong to any PEDIR_* section.
+            // Read directly from input file, but keep position (paranoia).
+            LE32 word;
+            upx_off_t const now_pos = fi->tell();
+            fi->seek(dd->fpos, SEEK_SET);
+            fi->read(&word, sizeof(word));
+            fi->seek(now_pos, SEEK_SET);
+            if (IMAGE_DLLCHARACTERISTICS_EX_CET_COMPAT & word) {
+                *(dbgCET = dd0) = *dd; // remember presence; copy to front
+            }
+        }
         if (overlaystart == dd->fpos)
             overlaystart += dd->size;
-    ibuf.fill(IDADDR(PEDIR_DEBUG), IDSIZE(PEDIR_DEBUG), FILLVAL);
+    }
+    ibuf.fill((!dbgCET ? 0 : sizeof(DebugDir)) + IDADDR(PEDIR_DEBUG),
+              (!dbgCET ? 0 : -(int) sizeof(DebugDir)) + IDSIZE(PEDIR_DEBUG), FILLVAL);
     return overlaystart;
 }
 
@@ -2488,8 +2506,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     obuf.clear(ph.c_len, c_len - ph.c_len);
 
     const unsigned aligned_sotls = ALIGN_UP(sotls, usizeof(LEXX));
-    const unsigned s1size =
-        ALIGN_UP(ic + c_len + codesize, usizeof(LEXX)) + aligned_sotls + soloadconf;
+    const unsigned s1size = ALIGN_UP(ic + c_len + codesize, usizeof(LEXX)) + aligned_sotls +
+                            soloadconf + (dbgCET ? (sizeof(LE32) + sizeof(*dbgCET)) : 0);
     const unsigned s1addr = (newvsize - (ic + c_len) + oam1) & ~oam1;
 
     const unsigned ncsection = (s1addr + s1size + oam1) & ~oam1;
@@ -2507,7 +2525,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     oh.chksum = 0;
 
     // fill the data directory
-    ODADDR(PEDIR_DEBUG) = 0;
+    ODADDR(PEDIR_DEBUG) = 0; // dbgCET later
     ODSIZE(PEDIR_DEBUG) = 0;
     ODADDR(PEDIR_IAT) = 0;
     ODSIZE(PEDIR_IAT) = 0;
@@ -2515,7 +2533,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     ODSIZE(PEDIR_BOUND_IMPORT) = 0;
 
     // tls & loadconf are put into section 1
-    ic = s1addr + s1size - aligned_sotls - soloadconf;
+    ic = s1addr + s1size - aligned_sotls - soloadconf -
+         (dbgCET ? (sizeof(LE32) + sizeof(*dbgCET)) : 0);
 
     if (use_tls_callbacks)
         tls_handler_offset = linker->getSymbolOffset("PETLSC2") + upxsection;
@@ -2530,6 +2549,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     ODSIZE(PEDIR_LOAD_CONFIG) = soloadconf;
     ic += soloadconf;
 
+    if (dbgCET) {
+        ODADDR(PEDIR_DEBUG) = ic;
+        ODSIZE(PEDIR_DEBUG) = sizeof(*dbgCET);
+        ic += sizeof(LE32) + ODSIZE(PEDIR_DEBUG);
+    }
     const bool rel_at_sections_start = last_section_rsrc_only;
 
     ic = ncsection;
@@ -2675,6 +2699,19 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         fo->write(ibuf, sizeof(LEXX) - ic);
     fo->write(otls, aligned_sotls);
     fo->write(oloadconf, soloadconf);
+    if (dbgCET) {
+        ic = fo->getBytesWritten();
+        dbgCET->fpos = ic + sizeof(*dbgCET);
+        dbgCET->rva = rvamin + 0x400 + dbgCET->fpos; // 0x400 => soheaders
+        LE32 word;
+        set_le32(&word, IMAGE_DLLCHARACTERISTICS_EX_CET_COMPAT);
+        if (0) { // set all bytes t0 zero
+            memset(dbgCET, 0, sizeof(*dbgCET));
+            set_le32(&word, 0);
+        }
+        fo->write(dbgCET, sizeof(*dbgCET));
+        fo->write(&word, sizeof(word));
+    }
     if ((ic = fo->getBytesWritten() & fam1) != 0)
         fo->write(ibuf, oh.filealign - ic);
     if (!last_section_rsrc_only)
@@ -2695,7 +2732,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
             fo->write(ibuf, oh.filealign - ic);
     }
 
-#if 0
+#if 0 // (debug) print section sizes
     printf("%-13s: program hdr  : %8d bytes\n", getName(), (int) sizeof(oh));
     printf("%-13s: sections     : %8d bytes\n", getName(), (int) sizeof(osection[0]) * oobjs);
     printf("%-13s: ident        : %8d bytes\n", getName(), (int) identsize);
@@ -3030,8 +3067,6 @@ void PeFile::unpack0(OutputFile *fo, const ht &ih, ht &oh, ord_mask_t ord_mask, 
     // memset(eistart, 0, ptr_udiff_bytes(extra_info, eistart) + 4);
 
     // fill the data directory
-    ODADDR(PEDIR_DEBUG) = 0;
-    ODSIZE(PEDIR_DEBUG) = 0;
     ODADDR(PEDIR_IAT) = 0;
     ODSIZE(PEDIR_IAT) = 0;
     ODADDR(PEDIR_BOUND_IMPORT) = 0;

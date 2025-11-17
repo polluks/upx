@@ -80,6 +80,7 @@ public:
         ptr_invalidate_and_poison(ptr); // point to non-null invalid address
         assertInvariants();
     }
+
     inline CSelf() { assertInvariants(); }
 
     // constructors from pointers
@@ -132,7 +133,6 @@ public:
     }
 
     // comparison
-
     bool operator==(pointer other) const noexcept { return ptr == other; }
     template <class U>
     XSPAN_REQUIRES_CONVERTIBLE_R(bool)
@@ -201,14 +201,20 @@ private:
     static forceinline pointer check_deref(pointer p, ptrdiff_t n) noexcept { return p + n; }
     static forceinline pointer check_add(pointer p, ptrdiff_t n) noexcept { return p + n; }
 
+    // disable taking the address => force passing by reference
+    // [I'm not too sure about this design decision, but we can always allow it if needed]
+    Self *operator&() const XSPAN_DELETED_FUNCTION;
+
 public: // raw access
     pointer raw_ptr() const noexcept { return ptr; }
 
-    pointer raw_bytes(size_t bytes) const {
+    pointer raw_bytes(size_t bytes) const may_throw {
         assertInvariants();
         if (bytes > 0) {
             if very_unlikely (ptr == nullptr)
                 xspan_fail_nullptr();
+            if very_unlikely (__acc_cte(VALGRIND_CHECK_MEM_IS_ADDRESSABLE(ptr, bytes) != 0))
+                throwCantPack("raw_bytes valgrind-check-mem");
         }
         return ptr;
     }

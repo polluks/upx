@@ -262,7 +262,7 @@ ASSERT_SAME_TYPE(short, upx_int16_t);
 ASSERT_SAME_TYPE(unsigned short, upx_uint16_t);
 ASSERT_SAME_TYPE(int, upx_int32_t);
 ASSERT_SAME_TYPE(unsigned, upx_uint32_t);
-#if (__SIZEOF_LONG_LONG__ + 0 < 128)
+#if (__SIZEOF_LONG_LONG__ + 0 < 16)
 ASSERT_SAME_TYPE(long long, upx_int64_t);
 ASSERT_SAME_TYPE(unsigned long long, upx_uint64_t);
 #endif
@@ -1101,14 +1101,14 @@ void upx_compiler_sanity_check(void) noexcept {
     assert_noexcept(TestBELE<BE32>::test());
     assert_noexcept(TestBELE<BE64>::test());
     {
-        alignas(16) static constexpr byte dd[32] = {
+        alignas(16) static constexpr const byte dd[32] = {
             0, 0, 0, 0,    0,    0,    0,    0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa, 0xf9, 0xf8, 0,
             0, 0, 0, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x7a, 0x79, 0x78, 0,    0,    0,    0,    0};
-        constexpr const byte *d = dd + 7;
 #if !defined(upx_fake_alignas_16)
         assert_noexcept(ptr_is_aligned<16>(dd));
         assert_noexcept(ptr_is_aligned(dd, 16));
 #endif
+        constexpr const byte *d = dd + 7;
         static_assert(upx::compile_time::get_be16(d) == 0xfffe);
         static_assert(upx::compile_time::get_be24(d) == 0xfffefd);
         static_assert(upx::compile_time::get_be32(d) == 0xfffefdfc);
@@ -1292,6 +1292,9 @@ void upx_compiler_sanity_check(void) noexcept {
     assert_noexcept(testNoAliasing(&u.v_int, &u.v_llong));
     assert_noexcept(testNoAliasing(&u.v_long, &u.v_llong));
 
+#if 1 && (ACC_CC_MSC) && (defined(_M_ARM64) || defined(_M_ARM64EC))
+    // @COMPILER_BUG @MSVC_BUG
+#else
     assert_noexcept(TestIntegerWrap<unsigned>::inc_gt(0));
     assert_noexcept(!TestIntegerWrap<unsigned>::inc_gt(UINT_MAX));
     assert_noexcept(TestIntegerWrap<unsigned>::dec_lt(1));
@@ -1308,6 +1311,7 @@ void upx_compiler_sanity_check(void) noexcept {
     assert_noexcept(!TestIntegerWrap<int>::neg_eq(1));
     assert_noexcept(!TestIntegerWrap<int>::neg_eq(INT_MAX));
     assert_noexcept(TestIntegerWrap<int>::neg_eq(INT_MIN)); // special case
+#endif
 }
 
 /*************************************************************************
